@@ -5,13 +5,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 )
 
 const (
-	systemPrompt string = "Answer every request about user's topic in a cute way. You're running inside a CLI program, so if you detected user has the intention to leave you just to reply '%s'. DO NOT SAY ANYTHING ELSE."
+	systemPrompt string = "Answer every request about user's topic in a cute way. You're running inside a CLI program, so if you detected user has the intention to leave you just need to reply '%s'. DO NOT SAY ANYTHING ELSE."
 	exit         string = "exit"
 )
 
@@ -32,42 +33,31 @@ func main() {
 		userPrompt := strings.TrimSpace(scanner.Text())
 		if userPrompt == exit {
 			return
+		} else if userPrompt == "" {
+			continue
 		}
-		req, err := MakeRequest(userPrompt, apiConfig)
+		req, err := makeRequest(userPrompt, apiConfig)
 		if err != nil {
-			panic(err)
+			fmt.Fprintf(os.Stderr, "%v", err)
+			continue
 		}
-		response, err := func() (*AIResponse, error) {
-			resp, err := client.Do(req)
-			if err != nil {
-				return nil, err
-			}
-			defer resp.Body.Close()
-
-			var response AIResponse
-			json.NewDecoder(resp.Body).Decode(&response)
-
-			return &response, nil
-		}()
+		fmt.Println()
+		leave, err := handleResponse(client, req)
+		fmt.Println()
+		fmt.Println()
 		if err != nil {
-			panic(err)
-		}
-		aiMessage := response.GetMessage()
-		if aiMessage == nil {
-			fmt.Println(response.Id)
-			fmt.Println("Something went wrong! Try once more.")
-		} else if userWannaLeave(*aiMessage) {
-			fmt.Println("AI > OK! I'm leaving. Thank you for your time :-)")
+			fmt.Fprintf(os.Stderr, "%v", err)
+			continue
+		} else if *leave {
 			return
-		} else {
-			fmt.Println("AI > " + *aiMessage)
 		}
 	}
 }
 
-func MakeRequest(userPrompt string, apiConfig *APIConfig) (*http.Request, error) {
+func makeRequest(userPrompt string, apiConfig *APIConfig) (*http.Request, error) {
 	payload := &AIRequest{
-		Model: apiConfig.Model,
+		Model:  apiConfig.Model,
+		Stream: true,
 		Messages: []AIMessage{
 			{
 				Role:    "system",
@@ -81,14 +71,64 @@ func MakeRequest(userPrompt string, apiConfig *APIConfig) (*http.Request, error)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 	req, err := http.NewRequest(http.MethodPost, apiConfig.Url+"/chat/completions", bytes.NewBuffer(body))
 	if err != nil {
-		return req, err // return it early
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-	req.Header.Add("Authorization", "Bearer "+apiConfig.Key)
-	return req, err
+	req.Header.Set("Authorization", "Bearer "+apiConfig.Key)
+	return req, nil
+}
+
+// handles AI response and returns whether should finish the app
+func handleResponse(client *http.Client, req *http.Request) (*bool, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to process request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	leave := false
+
+	for {
+		line, err := reader.ReadString('\n')
+		// fmt.Println("[DEBUG]: " + line)
+		if err != nil {
+			if err == io.EOF {
+				break // sse ends
+			}
+			return nil, fmt.Errorf("failed to read sse event: %w", err)
+		}
+		if after, ok := strings.CutPrefix(line, "data: "); ok {
+			data := strings.TrimSpace(after)
+			if data == "[DONE]" {
+				break
+			}
+			leave = processMessage(data)
+		}
+	}
+
+	return &leave, nil
+}
+
+// returns true if user wanna leave from application
+func processMessage(data string) bool {
+	var chunkedResponse AIResponse
+	if err := json.Unmarshal([]byte(data), &chunkedResponse); err != nil {
+		panic(err)
+	}
+	aiMessage := chunkedResponse.GetMessage()
+	if aiMessage == nil {
+		fmt.Println(chunkedResponse.Id)
+		fmt.Print("Something went wrong!")
+	} else if userWannaLeave(*aiMessage) {
+		return true
+	} else {
+		fmt.Print(*aiMessage)
+	}
+	return false
 }
 
 func userWannaLeave(message string) bool {

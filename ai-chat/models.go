@@ -2,6 +2,7 @@ package main
 
 type AIRequest struct {
 	Model    string      `json:"model"`
+	Stream   bool        `json:"stream"`
 	Messages []AIMessage `json:"messages"`
 }
 
@@ -12,7 +13,7 @@ type AIResponse struct {
 
 type AIChoice struct {
 	FinishReason string    `json:"finish_reason"`
-	Message      AIMessage `json:"message"`
+	Delta        AIMessage `json:"delta"`
 }
 
 type AIMessage struct {
@@ -24,5 +25,5 @@ func (resp *AIResponse) GetMessage() *string {
 	if len(resp.Choices) == 0 {
 		return nil
 	}
-	return &resp.Choices[0].Message.Content
+	return &resp.Choices[0].Delta.Content
 }
